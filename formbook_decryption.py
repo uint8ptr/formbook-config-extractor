@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python
 # https://github.com/tildedennis/malware/blob/master/formbook/formbook_decryption.py
 
 from Crypto.Cipher import ARC4
@@ -6,13 +6,11 @@ from Crypto.Cipher import ARC4
 
 class FormBookDecryption:
 
-    def decrypt_func1(self, encbuf, plainbuf_len):
+    def decrypt_func1(self, ebl, plainbuf_len):
         plainbuf = []
 
-        ebl = [ord(b) for b in encbuf]
-
         if ebl[0] != 0x55 or ebl[1] != 0x8b:
-            print "doesn't start with a function prologue"
+            print("Encrypted buffer doesn't start with a function prologue")
             return
 
         ebl = ebl[3:]
@@ -28,7 +26,7 @@ class FormBookDecryption:
                 plainbuf, ei = self.offset0_byte_1byte(plainbuf, ebl, ei)
 
 
-        return "".join([chr(b & 0xff) for b in plainbuf])
+        return bytes(plainbuf)
 
 
     def decrypt_func1_transform(self, plainbuf, ebl, ei):
@@ -286,31 +284,26 @@ class FormBookDecryption:
 
 
     def decrypt_func2(self, encbuf, key):
-        ebl = [ord(b) for b in encbuf]
+        round2 = bytearray(encbuf)
 
         # transform 1
         for i in range(len(encbuf) - 1, 0, -1):
-            ebl[i-1] -= ebl[i]
+            round2[i-1] = (round2[i-1] - round2[i]) & 0xff
 
         # transform 2
         for i in range(0, len(encbuf) -1):
-            ebl[i] -= ebl[i+1]
+            round2[i] = (round2[i] - round2[i+1]) & 0xff
 
-        # rc4
-        round2 = "".join([chr(b & 0xff) for b in ebl])
+        # RC4
         arc4 = ARC4.new(key)
-        round3 = arc4.decrypt(round2)
-
-        round3l = [ord(b) for b in round3]
+        round3 = bytearray(arc4.decrypt(round2))
 
         # transform 3
         for i in range(len(encbuf) - 1, 0, -1):
-            round3l[i-1] -= round3l[i]
+            round3[i-1] = (round3[i-1] - round3[i]) & 0xff
 
         # transform 4
         for i in range(0, len(encbuf) -1):
-            round3l[i] -= round3l[i+1]
+            round3[i] = (round3[i] - round3[i+1]) & 0xff
 
-        plainbuf = "".join([chr(b & 0xff) for b in round3l])
-
-        return plainbuf
+        return bytes(round3)

@@ -1,133 +1,122 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python
 # https://github.com/JPCERTCC/MalConfScan/blob/master/utils/formbookscan.py
 
 import re
-from sys import argv, stdout
+from struct import pack, unpack
+from sys import argv
+
 from Crypto.Hash import SHA
-from struct import unpack, unpack_from, pack
-from collections import OrderedDict
+
 from formbook_decryption import FormBookDecryption
 
-# Config pattern
-CONFIG_PATTERNS = [re.compile("\x83\xc4\x0c\x6a\x14\xe8(....)\x83\xc0\x02\x50\x8d(..)\x51\xe8(....)\x83\xc4\x0c\x6a\x14\xe8(....)\x83\xc0\x02\x50\x8d(..)\x52", re.DOTALL)]
+CONFIG_PATTERN = '83 c4 0c 6a 14 e8 ? ? ? ? 83 c0 02 50 8d ? ? 51 e8 ? ? ? ? 83 c4 0c 6a 14 e8 ? ? ? ? 83 c0 02 50 8d ? ? 52'
+HASHES_PATTERN = '68 ? ? 00 00 8d ? ? ? 00 00 e8'
+STRINGS_PATTERN = '6a 00 50 c6 85 ? ? ? ? 00 e8 ? ? ? ? 83 c4 0c 68 ? ? 00 00 e8'
 
-# Hashes pattern
-HASHS_PATTERNS = [re.compile("\x68(.)(\x02|\x03)\x00\x00\x8d(...)\x00\x00\xe8", re.DOTALL)]
+u32 = lambda x: unpack('<I', x)[0]
 
-# Strings pattern
-STRINGS_PATTERNS = [re.compile("\x6a\x00\x50\xc6\x85(....)\x00\xe8(....)\x83\xc4\x0c\x68(..)\x00\x00\xe8", re.DOTALL)]
+def find_pattern(pattern, data):
+    s = b''
 
+    for token in pattern.split():
+        if token == '?': s += b'.'
+        else: s += b'\\x' + token.encode()
 
-class formbookConfig():
-    """Parse the Formbook configuration"""
+    regex = re.compile(s, re.DOTALL)
+    result = re.search(regex, data)
 
-    def sha1_revert(self, digest):
-        tuples = unpack("<IIIII", digest)
-        output_hash = ""
-        for item in tuples:
-            output_hash += pack(">I", item)
-        return output_hash
+    if result != None:
+        return result.start()
 
-    def formbook_compute_sha1(self, input_buffer):
-        sha1 = SHA.new()
-        sha1.update(input_buffer)
-        return self.sha1_revert(sha1.digest())
+def sha1_revert(digest):
+    tuples = unpack('<IIIII', digest)
+    output_hash = bytearray()
+    for item in tuples:
+        output_hash += pack('>I', item)
+    return output_hash
 
-    def formbook_decrypt_strings(self, fb_decrypt, p_data, key, encrypted_strings):
-        offset = 0
-        i = 0
-        while offset < len(encrypted_strings):
-            str_len = ord(encrypted_strings[offset])
-            offset += 1
-            dec_str = fb_decrypt.decrypt_func2(encrypted_strings[offset:offset + str_len], key)
-            dec_str = dec_str[:-1]  # remove '\0' character
-            p_data["Encoded string " + str(i)] = dec_str
-            offset += str_len
-            i += 1
+def formbook_compute_sha1(input_buffer):
+    sha1 = SHA.new()
+    sha1.update(input_buffer)
+    return sha1_revert(sha1.digest())
 
-        return p_data
+fname = sys.argv[1]
 
-    def formbook_decrypt(self, key1, key2, config, config_size, strings_data, strings_size, url_size, hashs_data, hashs_size):
-        fb_decrypt = FormBookDecryption()
-        p_data = OrderedDict()
+with open(fname, 'rb') as f:
+    data = f.read()
 
-        rc4_key_one = fb_decrypt.decrypt_func1(key1, 0x14)
-        rc4_key_two = fb_decrypt.decrypt_func1(key2, 0x14)
-        encbuf2_s1 = fb_decrypt.decrypt_func1(hashs_data, hashs_size)
-        encbuf8_s1 = fb_decrypt.decrypt_func1(config, config_size)
-        encbuf9_s1 = fb_decrypt.decrypt_func1(strings_data, strings_size)
+offset = find_pattern(CONFIG_PATTERN, data) + 6
+key1_offset = u32(data[offset:offset+4]) + offset + 11
+key1 = data[key1_offset:key1_offset+40]
+offset += 23
 
-        rc4_key_1 = self.formbook_compute_sha1(encbuf8_s1)
-        rc4_key_2 = self.formbook_compute_sha1(encbuf9_s1)
-        rc4_key_3 = self.formbook_compute_sha1(rc4_key_two)
-        encbuf2_s2 = fb_decrypt.decrypt_func2(encbuf2_s1, rc4_key_1)
-        encbuf8_s2 = fb_decrypt.decrypt_func2(encbuf8_s1, rc4_key_2)
+key2_offset = u32(data[offset:offset+4]) + offset + 11
+key2 = data[key2_offset:key2_offset+40]
+offset += 21
 
-        n = 1
-        for i in xrange(config_size):
-            encrypted_c2c_uri = encbuf8_s2[i:i + url_size]
-            encrypted_c2c_uri = fb_decrypt.decrypt_func2(encrypted_c2c_uri, rc4_key_two)
-            c2c_uri = fb_decrypt.decrypt_func2(encrypted_c2c_uri, rc4_key_one)
-            if "www." in c2c_uri:
-                p_data["C&C URI " + str(n)] = c2c_uri
-                n += 1
+# config data
+config_size = u32(data[offset:offset+4])
+offset += 5
 
-        encrypted_hashes_array = fb_decrypt.decrypt_func2(encbuf2_s2, rc4_key_3)
-        rc4_key_pre_final = self.formbook_compute_sha1(encrypted_hashes_array)
-        rc4_key_final = fb_decrypt.decrypt_func2(rc4_key_two, rc4_key_pre_final)
+config_offset = u32(data[offset:offset+4]) + offset + 11
+config = data[config_offset:config_offset + (config_size*2)]
+offset += 33
 
-        p_data = self.formbook_decrypt_strings(fb_decrypt, p_data, rc4_key_final, encbuf9_s1)
+url_size = data[offset]
 
-        return p_data
+# strings data
+offset = find_pattern(STRINGS_PATTERN, data) + 19
+strings_size = u32(data[offset:offset+4])
+offset += 5
 
-    def calculate(self, fname):
-        with open(fname) as f:
-            data = f.read()
+strings_offset = u32(data[offset:offset+4]) + offset + 11
+strings_data = data[strings_offset:strings_offset + (strings_size*2)]
 
-        for pattern in CONFIG_PATTERNS:
-            offset = re.search(pattern, data).start()
+# hashes data
+offset = find_pattern(HASHES_PATTERN, data)
+offset += 1
 
-        offset += 6
-        key1_offset = unpack("=I", data[offset:offset + 4])[0] + offset + 11
-        key1 = data[key1_offset:key1_offset + (0x14 * 2)]
-        offset += 23
-        key2_offset = unpack("=I", data[offset:offset + 4])[0] + offset + 11
-        key2 = data[key2_offset:key2_offset + (0x14 * 2)]
-        offset += 21
-        config_size = unpack("=I", data[offset:offset + 4])[0]
-        offset += 5
-        config_offset = unpack("=I", data[offset:offset + 4])[0] + offset + 11
-        config = data[config_offset:config_offset + (config_size * 2)]
-        offset += 33
-        url_size = unpack("b", data[offset])[0]
+hashes_size = u32(data[offset:offset+4])
+offset += 11
 
-        for pattern in STRINGS_PATTERNS:
-            offset = re.search(pattern, data).start()
+hashes_offset = u32(data[offset:offset+4]) + offset + 11
+hashes_data = data[hashes_offset:hashes_offset + (hashes_size*2)]
 
-        offset += 19
-        strings_size = unpack("=I", data[offset:offset + 4])[0]
-        offset += 5
-        strings_offset = unpack("=I", data[offset:offset + 4])[0] + offset + 11
-        strings_data = data[strings_offset:strings_offset + (strings_size * 2)]
+# decrypt buffers
+fd = FormBookDecryption()
+rc4_key1 = fd.decrypt_func1(key1, 20)
+rc4_key2 = fd.decrypt_func1(key2, 20)
 
-        for pattern in HASHS_PATTERNS:
-            offset = re.search(pattern, data).start()
+encbuf2_s1 = fd.decrypt_func1(hashes_data, hashes_size)
+encbuf8_s1 = fd.decrypt_func1(config, config_size)
+encbuf9_s1 = fd.decrypt_func1(strings_data, strings_size)
 
-        offset += 1
-        hashs_size = unpack("=I", data[offset:offset + 4])[0]
-        offset += 11
-        hashs_offset = unpack("=I", data[offset:offset + 4])[0] + offset + 11
-        hashs_data = data[hashs_offset:hashs_offset + (hashs_size * 2)]
+encbuf2_s1_key = formbook_compute_sha1(encbuf8_s1)
+encbuf2_s2_key = formbook_compute_sha1(rc4_key2)
+encbuf8_s1_key = formbook_compute_sha1(encbuf9_s1)
 
-        return self.formbook_decrypt(key1, key2, config, config_size, strings_data,
-                                    strings_size, url_size, hashs_data, hashs_size)
+encbuf2_s2 = fd.decrypt_func2(encbuf2_s1, encbuf2_s1_key)
+encbuf8_s2 = fd.decrypt_func2(encbuf8_s1, encbuf8_s1_key)
 
-    def render_text(self, outfd, data):
-        outfd.write("[Config Info]\n")
-        for id, param in data.items():
-            outfd.write("{0:<16}: {1}\n".format(id, param))
+n = 1
+for i in range(config_size):
+    enc_c2_uri = fd.decrypt_func2(encbuf8_s2[i:i + url_size], rc4_key2)
+    c2_uri = fd.decrypt_func2(enc_c2_uri, rc4_key1)
 
-if __name__ == "__main__":
-    fc = formbookConfig()
-    config_data = fc.calculate(argv[1])
-    fc.render_text(stdout, config_data)
+    if c2_uri.startswith(b'www'):
+        print(f'C&C URI {n}: {repr(c2_uri[:-1].decode())}')
+        n += 1
+
+encrypted_hashes_array = fd.decrypt_func2(encbuf2_s2, encbuf2_s2_key)
+rc4_key_pre_final = formbook_compute_sha1(encrypted_hashes_array)
+rc4_key_final = fd.decrypt_func2(rc4_key2, rc4_key_pre_final)
+
+offset = 0
+i = 0
+while offset < len(encbuf9_s1):
+    str_len = encbuf9_s1[offset]
+    offset += 1
+    dec_str = fd.decrypt_func2(encbuf9_s1[offset:offset + str_len], rc4_key_final)
+    print(f'Encoded string {i}: {repr(dec_str[:-1].decode())}')
+    offset += str_len
+    i += 1
